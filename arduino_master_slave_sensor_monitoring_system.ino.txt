@@ -1,0 +1,407 @@
+MASTER
+
+#include <Wire.h>
+#include <Servo.h>
+
+const int LDR_PIN = A0;
+const int GAS_PIN = A1;
+const int TEMP_PIN = A2;
+const int SERVO_PIN = 9;
+const int BUZZ_PIN = 8;
+const byte MASTER_ADDRESS = 8;
+const int GAS_ALERT_THRESHOLD = 180;
+const int GAS_CLEAR_THRESHOLD = 130;
+const float TEMP_EMERGENCY_THRESHOLD = 45.0;
+const int BLACKOUT_DROP = 100;
+const int LIGHT_RESTORE_THRESHOLD = 150;
+const byte CMD_ACTIVATE = 0;
+const byte CMD_RESET = 16;
+
+enum SystemState { STANDBY, ACTIVE, GAS_ALERT, BLACKOUT_ALERT, TEMPERATURE_EMERGENCY, MULTI_FAULT };
+SystemState currentState = STANDBY;
+
+Servo ventServo;
+
+int ldrValue = 0;
+int gasValue = 0;
+float temperature = 0.0;
+bool gasAlertActive = false;
+bool blackoutActive = false;
+int previousLdrValue = 0;
+
+void requestEvent() {
+  byte tempByte = (byte)constrain((int)temperature, 0, 255);
+  byte lightByte = map(constrain(ldrValue, 0, 1023), 0, 1023, 0, 255);
+  byte gasByte = map(constrain(gasValue, 0, 1023), 0, 1023, 0, 255);
+  Wire.write(tempByte);
+  Wire.write(lightByte);
+  Wire.write(gasByte);
+  Wire.write((byte)currentState);
+}
+
+void receiveEvent(int howMany) {
+  if (howMany <= 0) { return; }
+  byte command = Wire.read();
+  while (Wire.available()) { Wire.read(); }
+  if (command == CMD_ACTIVATE) {
+    if (currentState == STANDBY) {
+      currentState = ACTIVE;
+      previousLdrValue = ldrValue;
+      gasAlertActive = false;
+      blackoutActive = false;
+      Serial.println("SYSTEM ACTIVATED");
+      Serial.print("INITIAL LDR REFERENCE: ");
+      Serial.println(previousLdrValue);
+    }
+  }
+  else if (command == CMD_RESET) {
+    if (currentState == TEMPERATURE_EMERGENCY) {
+      if (temperature <= TEMP_EMERGENCY_THRESHOLD) {
+        ventServo.write(0);
+        currentState = ACTIVE;
+        previousLdrValue = ldrValue;
+        Serial.println("TEMPERATURE EMERGENCY RESET");
+        Serial.println("SERVO -> 0 DEGREES");
+      }
+      else {
+        Serial.println("RESET DENIED - TEMPERATURE STILL HIGH");
+      }
+    }
+  }
+}
+
+void readTemperature() {
+  int rawTemp = analogRead(TEMP_PIN);
+  float voltage = rawTemp * (5.0 / 1023.0);
+  temperature = (voltage - 0.5) * 100.0;
+}
+
+void readSensors() {
+  if (currentState == STANDBY) { return; }
+  ldrValue = analogRead(LDR_PIN);
+  gasValue = analogRead(GAS_PIN);
+  readTemperature();
+}
+
+void updateGasFault() {
+  if (!gasAlertActive) {
+    if (gasValue > GAS_ALERT_THRESHOLD) {
+      gasAlertActive = true;
+      Serial.println("GAS ALERT DETECTED");
+    }
+  }
+  else {
+    if (gasValue < GAS_CLEAR_THRESHOLD) {
+      gasAlertActive = false;
+      Serial.println("GAS LEVEL SAFE");
+    }
+  }
+}
+
+void updateBlackoutFault() {
+  if (blackoutActive) {
+    if (ldrValue >= LIGHT_RESTORE_THRESHOLD) {
+      blackoutActive = false;
+      Serial.println("LIGHT RESTORED");
+    }
+    return;
+  }
+  int lightDecrease = previousLdrValue - ldrValue;
+  if (lightDecrease >= BLACKOUT_DROP) {
+    blackoutActive = true;
+    Serial.println("BLACKOUT DETECTED");
+    Serial.print("Previous LDR: ");
+    Serial.println(previousLdrValue);
+    Serial.print("Current LDR: ");
+    Serial.println(ldrValue);
+    Serial.print("Light decrease: ");
+    Serial.println(lightDecrease);
+  }
+}
+
+void updateStateMachine() {
+  if (currentState == STANDBY) {
+    digitalWrite(BUZZ_PIN, LOW);
+    return;
+  }
+  if (temperature > TEMP_EMERGENCY_THRESHOLD) {
+    if (currentState != TEMPERATURE_EMERGENCY) {
+      currentState = TEMPERATURE_EMERGENCY;
+      ventServo.write(180);
+      Serial.println("======================");
+      Serial.println("TEMPERATURE EMERGENCY!");
+      Serial.println("SERVO -> 180 DEGREES");
+      Serial.println("======================");
+    }
+    return;
+  }
+  if (currentState == TEMPERATURE_EMERGENCY) {
+    ventServo.write(180);
+    return;
+  }
+  updateGasFault();
+  updateBlackoutFault();
+  if (gasAlertActive && blackoutActive) {
+    currentState = MULTI_FAULT;
+    digitalWrite(BUZZ_PIN, HIGH);
+    return;
+  }
+  if (currentState == MULTI_FAULT) {
+    if (gasAlertActive && blackoutActive) {
+      digitalWrite(BUZZ_PIN, HIGH);
+      return;
+    }
+    if (gasAlertActive && !blackoutActive) {
+      currentState = GAS_ALERT;
+      digitalWrite(BUZZ_PIN, LOW);
+      return;
+    }
+    if (!gasAlertActive && blackoutActive) {
+      currentState = BLACKOUT_ALERT;
+      digitalWrite(BUZZ_PIN, LOW);
+      return;
+    }
+    if (!gasAlertActive && !blackoutActive) {
+      currentState = ACTIVE;
+      digitalWrite(BUZZ_PIN, LOW);
+      return;
+    }
+  }
+  if (currentState == GAS_ALERT) {
+    if (gasAlertActive && blackoutActive) {
+      currentState = MULTI_FAULT;
+      digitalWrite(BUZZ_PIN, HIGH);
+      return;
+    }
+    if (gasAlertActive) {
+      digitalWrite(BUZZ_PIN, LOW);
+      return;
+    }
+    if (!gasAlertActive) {
+      if (blackoutActive) { currentState = BLACKOUT_ALERT; }
+      else { currentState = ACTIVE; }
+      digitalWrite(BUZZ_PIN, LOW);
+      return;
+    }
+  }
+  if (currentState == BLACKOUT_ALERT) {
+    if (gasAlertActive && blackoutActive) {
+      currentState = MULTI_FAULT;
+      digitalWrite(BUZZ_PIN, HIGH);
+      return;
+    }
+    if (blackoutActive) {
+      digitalWrite(BUZZ_PIN, LOW);
+      return;
+    }
+    if (!blackoutActive) {
+      if (gasAlertActive) { currentState = GAS_ALERT; }
+      else { currentState = ACTIVE; }
+      digitalWrite(BUZZ_PIN, LOW);
+      return;
+    }
+  }
+  if (currentState == ACTIVE) {
+    digitalWrite(BUZZ_PIN, LOW);
+    if (gasAlertActive && blackoutActive) {
+      currentState = MULTI_FAULT;
+      digitalWrite(BUZZ_PIN, HIGH);
+    }
+    else if (gasAlertActive) { currentState = GAS_ALERT; }
+    else if (blackoutActive) { currentState = BLACKOUT_ALERT; }
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(BUZZ_PIN, OUTPUT);
+  digitalWrite(BUZZ_PIN, LOW);
+  ventServo.attach(SERVO_PIN);
+  ventServo.write(0);
+  Wire.begin(MASTER_ADDRESS);
+  Wire.onRequest(requestEvent);
+  Wire.onReceive(receiveEvent);
+  ldrValue = 0;
+  gasValue = 0;
+  temperature = 0.0;
+  previousLdrValue = 0;
+  currentState = STANDBY;
+  Serial.println("======================");
+  Serial.println("MASTER READY");
+  Serial.println("STATE: STANDBY");
+  Serial.println("SENSORS INACTIVE");
+  Serial.println("======================");
+}
+
+void loop() {
+  readSensors();
+  updateStateMachine();
+  Serial.print("Temp: ");
+  Serial.print(temperature);
+  Serial.print(" C | LDR: ");
+  Serial.print(ldrValue);
+  Serial.print(" | Gas: ");
+  Serial.print(gasValue);
+  Serial.print(" | State: ");
+  Serial.println(currentState);
+  if (currentState != STANDBY) { previousLdrValue = ldrValue; }
+  delay(200);
+}
+/*https://www.tinkercad.com/things/e2OoiC7nSNv-arduino-master-slave-sensor-monitoring-system?*sharecode=jbYGSLQjMU671qToFarFkW8scpEkv3OMLbgeHAX-G08
+*/
+SLAVE
+
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <IRremote.h>
+
+LiquidCrystal_I2C lcd(0x20, 16, 2);
+
+const int IR_PIN = 11;
+const byte POWER_BUTTON = 0;
+const byte SIX_BUTTON = 22;
+const byte ONE_BUTTON = 16;
+const byte SENSOR_ARDUINO = 8;
+const byte STANDBY = 0;
+const byte ACTIVE = 1;
+const byte GAS_ALERT = 2;
+const byte BLACKOUT_ALERT = 3;
+const byte TEMPERATURE_EMERGENCY = 4;
+const byte MULTI_FAULT = 5;
+
+byte temperature = 0;
+int lightValue = 0;
+int gasValue = 0;
+byte currentState = STANDBY;
+bool showLight = false;
+
+void sendCommand(byte command) {
+  Wire.beginTransmission(SENSOR_ARDUINO);
+  Wire.write(command);
+  Wire.endTransmission();
+}
+
+bool getSensorData() {
+  Wire.requestFrom(SENSOR_ARDUINO, 4);
+  if (Wire.available() >= 4) {
+    temperature = Wire.read();
+    byte light = Wire.read();
+    lightValue = map(light, 0, 255, 0, 1023);
+    byte gas = Wire.read();
+    gasValue = map(gas, 0, 255, 0, 1023);
+    currentState = Wire.read();
+    return true;
+  }
+  return false;
+}
+
+void displayStandby() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("AWAITING RITUAL");
+}
+
+void displayActive() {
+  lcd.clear();
+  if (!showLight) {
+    lcd.setCursor(0, 0);
+    lcd.print("GAS LEVEL:");
+    lcd.setCursor(0, 1);
+    lcd.print(gasValue);
+  }
+  else {
+    lcd.setCursor(0, 0);
+    lcd.print("LIGHT LEVEL:");
+    lcd.setCursor(0, 1);
+    lcd.print(lightValue);
+  }
+}
+
+void displayGasAlert() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("TOXIC PURGE");
+}
+
+void displayBlackout() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("NOCTIS");
+  lcd.setCursor(0, 1);
+  lcd.print("PROTOCOL");
+}
+
+void displayTemperatureEmergency() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("COOKED");
+}
+
+void displayMultiFault() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("MULTIPLE");
+  lcd.setCursor(0, 1);
+  lcd.print("PROBLEMS DETECT");
+}
+
+void handleIR() {
+  if (!IrReceiver.decode()) { return; }
+  byte command = IrReceiver.decodedIRData.command;
+  Serial.print("IR Command: ");
+  Serial.println(command);
+  if (command == POWER_BUTTON) {
+    if (currentState == STANDBY) {
+      sendCommand(POWER_BUTTON);
+      showLight = false;
+      Serial.println("ACTIVATION SENT");
+      delay(200);
+    }
+  }
+  else if (command == SIX_BUTTON) {
+    if (currentState == ACTIVE) {
+      showLight = !showLight;
+      Serial.println("DISPLAY TOGGLED");
+      displayActive();
+    }
+  }
+  else if (command == ONE_BUTTON) {
+    if (currentState == TEMPERATURE_EMERGENCY) {
+      sendCommand(ONE_BUTTON);
+      Serial.println("RESET SENT");
+      delay(200);
+    }
+  }
+  IrReceiver.resume();
+}
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+  IrReceiver.begin(IR_PIN, ENABLE_LED_FEEDBACK);
+  currentState = STANDBY;
+  displayStandby();
+  Serial.println("======================");
+  Serial.println("SLAVE READY");
+  Serial.println("STATE: STANDBY");
+  Serial.println("======================");
+}
+
+void loop() {
+  handleIR();
+  getSensorData();
+  switch (currentState) {
+    case STANDBY: displayStandby(); break;
+    case ACTIVE: displayActive(); break;
+    case GAS_ALERT: displayGasAlert(); break;
+    case BLACKOUT_ALERT: displayBlackout(); break;
+    case TEMPERATURE_EMERGENCY: displayTemperatureEmergency(); break;
+    case MULTI_FAULT: displayMultiFault(); break;
+  }
+  delay(300);
+}
+/*https://www.tinkercad.com/things/e2OoiC7nSNv-arduino-master-slave-sensor-monitoring-system?*sharecode=jbYGSLQjMU671qToFarFkW8scpEkv3OMLbgeHAX-G08
+*/
