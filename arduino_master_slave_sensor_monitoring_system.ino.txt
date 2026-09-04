@@ -247,8 +247,7 @@ void loop() {
   if (currentState != STANDBY) { previousLdrValue = ldrValue; }
   delay(200);
 }
-/*https://www.tinkercad.com/things/e2OoiC7nSNv-arduino-master-slave-sensor-monitoring-system?*sharecode=jbYGSLQjMU671qToFarFkW8scpEkv3OMLbgeHAX-G08
-*/
+https://www.tinkercad.com/things/e2OoiC7nSNv-arduino-master-slave-sensor-monitoring-system?sharecode=jbYGSLQjMU671qToFarFkW8scpEkv3OMLbgeHAX-G08
 SLAVE
 
 
@@ -403,5 +402,4 @@ void loop() {
   }
   delay(300);
 }
-/*https://www.tinkercad.com/things/e2OoiC7nSNv-arduino-master-slave-sensor-monitoring-system?*sharecode=jbYGSLQjMU671qToFarFkW8scpEkv3OMLbgeHAX-G08
-*/
+https://www.tinkercad.com/things/e2OoiC7nSNv-arduino-master-slave-sensor-monitoring-system?sharecode=jbYGSLQjMU671qToFarFkW8scpEkv3OMLbgeHAX-G08
